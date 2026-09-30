@@ -180,3 +180,77 @@ def extract_morphology_features(candidate_mask, retinal_mask):
 
         "mean_solidity": np.mean(solidities),
     }
+
+def extract_vessel_features(vessel_mask, retinal_mask):
+    """
+    Extract simple morphological features from the vessel mask.
+
+    Parameters
+    ----------
+    vessel_mask : numpy.ndarray
+        Binary vessel mask.
+
+    retinal_mask : numpy.ndarray
+        Binary retinal-region mask.
+
+    Returns
+    -------
+    dict
+        Numerical vessel features.
+    """
+
+    # Retinal area
+    retinal_area = np.sum(retinal_mask > 0)
+
+    # Vessel area
+    vessel_area = np.sum(vessel_mask > 0)
+
+    # Vessel density
+    vessel_density = (
+        vessel_area / retinal_area
+        if retinal_area > 0 else 0
+    )
+
+    # Find connected vessel regions
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+        vessel_mask,
+        connectivity=8
+    )
+
+    component_areas = []
+
+    for label in range(1, num_labels):
+
+        area = stats[label, cv2.CC_STAT_AREA]
+
+        # Ignore tiny isolated noise
+        if area < 5:
+            continue
+
+        component_areas.append(area)
+
+    # No valid vessel components
+    if len(component_areas) == 0:
+        return {
+            "vessel_area": 0,
+            "vessel_density": 0,
+            "num_vessel_components": 0,
+            "mean_vessel_component_area": 0,
+            "std_vessel_component_area": 0,
+        }
+
+    return {
+        "vessel_area": vessel_area,
+
+        "vessel_density": vessel_density,
+
+        "num_vessel_components": len(component_areas),
+
+        "mean_vessel_component_area": np.mean(
+            component_areas
+        ),
+
+        "std_vessel_component_area": np.std(
+            component_areas
+        ),
+    }
