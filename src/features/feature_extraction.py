@@ -1,7 +1,6 @@
-import numpy as np
-from skimage.feature import graycomatrix, graycoprops
 import cv2
 import numpy as np
+from skimage.feature import graycomatrix, graycoprops
 
 
 def extract_color_features(masked_rgb, retinal_mask):
@@ -181,6 +180,7 @@ def extract_morphology_features(candidate_mask, retinal_mask):
         "mean_solidity": np.mean(solidities),
     }
 
+
 def extract_vessel_features(vessel_mask, retinal_mask):
     """
     Extract simple morphological features from the vessel mask.
@@ -254,3 +254,193 @@ def extract_vessel_features(vessel_mask, retinal_mask):
             component_areas
         ),
     }
+
+
+
+# ======================================================
+# Mask builders (shared by extract_all_features and the
+# visualization notebook, so both use identical logic)
+# ======================================================
+
+def build_bright_candidate_mask(green_enhanced, retinal_mask, threshold=180):
+    """
+    Bright candidate regions: pixels of the CLAHE-enhanced green channel
+    above `threshold`, restricted to the retinal region.
+    These are candidates, not confirmed lesions (the optic disc and
+    illumination artefacts are also bright).
+    """
+
+    _, candidate_mask = cv2.threshold(
+        green_enhanced,
+        threshold,
+        255,
+        cv2.THRESH_BINARY
+    )
+
+    candidate_mask = cv2.bitwise_and(
+        candidate_mask,
+        candidate_mask,
+        mask=retinal_mask
+    )
+
+    return candidate_mask
+
+
+def build_vessel_mask(green_enhanced, retinal_mask, kernel_size=15,
+                      return_intermediates=False):
+    """
+    Candidate vessel mask: black-hat transform -> Otsu threshold ->
+    3x3 morphological opening.
+
+    If return_intermediates is True, also returns a dict with the
+    black-hat image, the mask before opening and the Otsu threshold.
+    """
+
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE,
+        (kernel_size, kernel_size)
+    )
+
+    blackhat = cv2.morphologyEx(
+        green_enhanced,
+        cv2.MORPH_BLACKHAT,
+        kernel
+    )
+
+    blackhat = cv2.bitwise_and(
+        blackhat,
+        blackhat,
+        mask=retinal_mask
+    )
+
+    otsu_threshold, otsu_mask = cv2.threshold(
+        blackhat,
+        0,
+        255,
+        cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    )
+
+    small_kernel = np.ones((3, 3), np.uint8)
+
+    vessel_mask = cv2.morphologyEx(
+        otsu_mask,
+        cv2.MORPH_OPEN,
+        small_kernel
+    )
+
+    if return_intermediates:
+        return vessel_mask, {
+            "blackhat": blackhat,
+            "otsu_mask": otsu_mask,
+            "otsu_threshold": otsu_threshold,
+        }
+
+    return vessel_mask
+
+
+def extract_all_features(image_path, include_red_lesions=True, red_params=None):
+    """
+    Run the complete preprocessing and feature extraction
+    pipeline for one fundus image.
+
+    Parameters
+    ----------
+    image_path : str or Path
+        Path to the fundus image.
+
+    include_red_lesions : bool
+        If True, also extract the red-lesion candidate family
+        (computed at higher resolution, see red_lesion_features.py).
+        Set to False to reproduce the original 27 features.
+
+    red_params : dict, optional
+        Overrides for red_lesion_features.PARAMS.
+
+    Returns
+    -------
+    dict
+        Dictionary containing all extracted features.
+    """
+
+    from src.preprocessing.image_preprocessing import preprocess_image
+
+    # --------------------------------------------------
+    # 1. Preprocessing
+    # --------------------------------------------------
+
+    result = preprocess_image(image_path)
+
+    masked_rgb = result["masked_rgb"]
+    retinal_mask = result["retinal_mask"]
+    green_enhanced = result["green_enhanced"]
+
+    # --------------------------------------------------
+    # 2. Candidate abnormal-region mask
+    # --------------------------------------------------
+
+    candidate_mask = build_bright_candidate_mask(
+        green_enhanced,
+        retinal_mask
+    )
+
+    # --------------------------------------------------
+    # 3. Vessel mask
+    # --------------------------------------------------
+
+    vessel_mask = build_vessel_mask(
+        green_enhanced,
+        retinal_mask
+    )
+
+    # --------------------------------------------------
+    # 4. Extract feature families
+    # --------------------------------------------------
+
+    color_features = extract_color_features(
+        masked_rgb,
+        retinal_mask
+    )
+
+    texture_features = extract_texture_features(
+        green_enhanced
+    )
+
+    morphology_features = extract_morphology_features(
+        candidate_mask,
+        retinal_mask
+    )
+
+    vessel_features = extract_vessel_features(
+        vessel_mask,
+        retinal_mask
+    )
+
+    # --------------------------------------------------
+    # 5. Combine everything
+    # --------------------------------------------------
+
+    features = {}
+
+    features.update(color_features)
+    features.update(texture_features)
+    features.update(morphology_features)
+    features.update(vessel_features)
+
+    # --------------------------------------------------
+    # 6. Red-lesion candidate features (new family)
+    #    Uses its own higher-resolution, aspect-preserving copy of the
+    #    image because microaneurysm-sized spots vanish at 512 x 512.
+    # --------------------------------------------------
+
+    if include_red_lesions:
+        from src.features.red_lesion_features import (
+            load_retina,
+            extract_red_lesion_features,
+        )
+
+        rgb_hr, mask_hr = load_retina(image_path)
+        features.update(
+            extract_red_lesion_features(rgb_hr, mask_hr, red_params)
+        )
+
+    return features
